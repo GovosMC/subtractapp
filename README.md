@@ -42,7 +42,7 @@ Limitations: PDF parsing may vary by bank format; CSV is recommended for accurac
 3. Access at `https://your-username.github.io/subtractapp`.
 
 ### Local Development
-1. Clone the repo: `git clone https://github.com/miltonnitsche/subtractapp.git`
+1. Clone the repo: `git clone https://github.com/govosmc/subtractapp.git`
 2. Open `index.html` in your browser.
 
 No build steps needed – it's static!

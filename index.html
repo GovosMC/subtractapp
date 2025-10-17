@@ -23,8 +23,8 @@
     </style>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.7.82/pdf.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script> <!-- For XLSX -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/fuse.js/7.0.0/fuse.min.js"></script> <!-- For fuzzy matching -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/fuse.js/7.0.0/fuse.min.js"></script>
 </head>
 <body>
     <h1>Stop Bleeding Money on Forgotten Subscriptions</h1>
@@ -32,7 +32,7 @@
     
     <div class="drop-zone" id="dropZone" aria-label="Drop your bank statement here">
         <p>📁 Drop your bank statement here (CSV, PDF, XLSX)</p>
-        <input type="file" id="fileInput" accept=".csv,.pdf,.xlsx" style="display: none;" aria-hidden="true">
+        <input type="file" id="fileInput" accept=".csv,.pdf,.xlsx,.xls" style="display: none;" aria-hidden="true">
     </div>
     
     <div id="progress">
@@ -53,7 +53,7 @@
     </div>
 
     <script>
-        // Expanded cancellation links (sourced from official guides)
+        // Expanded cancellation links
         const cancelLinks = {
             'netflix': 'https://www.netflix.com/cancelplan',
             'spotify': 'https://www.spotify.com/account/subscription/',
@@ -69,11 +69,16 @@
             'siriusxm': 'https://www.siriusxm.com/manageaccount',
             'audible': 'https://www.audible.com/acct',
             'google': 'https://one.google.com/',
-            'microsoft': 'https://account.microsoft.com/services'
+            'microsoft': 'https://account.microsoft.com/services',
+            'adobe': 'https://account.adobe.com/plans',
+            'nyt': 'https://myaccount.nytimes.com/seg/',
+            'wsj': 'https://customercenter.wsj.com/',
+            'dropbox': 'https://www.dropbox.com/account/billing',
+            'zoom': 'https://zoom.us/billing'
             // Add more as needed
         };
 
-        // Setup UI elements
+        // UI setup
         const dropZone = document.getElementById('dropZone');
         const fileInput = document.getElementById('fileInput');
         const progress = document.getElementById('progress');
@@ -92,25 +97,28 @@
         fileInput.addEventListener('change', e => handleFile(e.target.files[0]));
 
         async function handleFile(file) {
-            if (!file) return;
+            if (!file) return alert('No file selected.');
             progress.style.display = 'block';
             report.style.display = 'none';
             progressFill.style.width = '0%';
             try {
                 let transactions = [];
-                if (file.name.endsWith('.csv')) {
+                const ext = file.name.split('.').pop().toLowerCase();
+                if (ext === 'csv') {
                     transactions = await parseCSV(file);
-                } else if (file.name.endsWith('.pdf')) {
+                } else if (ext === 'pdf') {
                     transactions = await parsePDF(file);
-                } else if (file.name.endsWith('.xlsx')) {
+                } else if (['xlsx', 'xls'].includes(ext)) {
                     transactions = await parseXLSX(file);
                 } else {
-                    throw new Error('Unsupported file type');
+                    throw new Error('Unsupported file type. Use CSV, PDF, or XLSX.');
                 }
+                if (transactions.length === 0) throw new Error('No valid transactions found in the file.');
                 const subscriptions = detectSubscriptions(transactions);
+                if (subscriptions.length === 0) alert('No recurring subscriptions detected. Try a different file.');
                 renderReport(subscriptions);
             } catch (error) {
-                alert('Error: ' + error.message);
+                alert('Error processing file: ' + error.message);
             } finally {
                 progress.style.display = 'none';
             }
@@ -126,15 +134,16 @@
                     header: true,
                     skipEmptyLines: true,
                     complete: results => {
-                        if (results.errors.length) reject(results.errors[0]);
-                        resolve(results.data.map((row, i) => {
+                        if (results.errors.length) reject(new Error(results.errors[0].message));
+                        const data = results.data.map((row, i) => {
                             updateProgress((i / results.data.length) * 100);
                             return {
-                                date: new Date(row.Date || row['Transaction Date'] || row['Posting Date']),
-                                desc: (row.Description || row['Transaction Description'] || row.Memo).toLowerCase(),
+                                date: new Date(row.Date || row['Transaction Date'] || row['Posting Date'] || row['Date Posted']),
+                                desc: (row.Description || row['Transaction Description'] || row.Memo || row['Payee']).toLowerCase().trim(),
                                 amount: parseFloat(row.Amount || row.Debit || row.Credit || row['Transaction Amount']) || 0
                             };
-                        }).filter(t => !isNaN(t.date) && t.amount < 0)); // Debits negative
+                        }).filter(t => !isNaN(t.date.getTime()) && t.amount < 0 && t.desc); // Valid debits
+                        resolve(data);
                     },
                     error: reject
                 });
@@ -143,58 +152,67 @@
 
         async function parsePDF(file) {
             const url = URL.createObjectURL(file);
-            const loadingTask = pdfjsLib.getDocument(url);
-            const pdf = await loadingTask.promise;
-            let text = '';
-            for (let i = 1; i <= pdf.numPages; i++) {
-                updateProgress((i / pdf.numPages) * 50);
-                const page = await pdf.getPage(i);
-                const content = await page.getTextContent();
-                text += content.items.map(item => item.str).join(' ') + '\n';
-            }
-            // Improved regex for various formats: Date (MM/DD/YY or MM/DD/YYYY), Desc, Amount ($XX.XX or -XX.XX)
-            const lines = text.split('\n').filter(line => line.trim());
-            const transactions = [];
-            const transactionRegex = /(?:\b(0?[1-9]|1[0-2])\/(0?[1-9]|[12]\d|3[01])\/(\d{2}|\d{4})\b)\s+(.*?)\s+([-$]?[\d,]+\.\d{2})\b/;
-            lines.forEach((line, idx) => {
-                updateProgress(50 + (idx / lines.length) * 50);
-                const match = line.match(transactionRegex);
-                if (match) {
-                    let year = match[3];
-                    if (year.length === 2) year = `20${year}`;
-                    transactions.push({
-                        date: new Date(`${match[1]}/${match[2]}/${year}`),
-                        desc: match[4].toLowerCase().trim(),
-                        amount: -Math.abs(parseFloat(match[5].replace(/[$,]/g, '')))
-                    });
+            try {
+                const loadingTask = pdfjsLib.getDocument(url);
+                const pdf = await loadingTask.promise;
+                let text = '';
+                for (let i = 1; i <= pdf.numPages; i++) {
+                    updateProgress((i / pdf.numPages) * 50);
+                    const page = await pdf.getPage(i);
+                    const content = await page.getTextContent();
+                    text += content.items.map(item => item.str).join(' ') + '\n';
                 }
-            });
-            URL.revokeObjectURL(url);
-            return transactions.filter(t => !isNaN(t.date));
+                const lines = text.split('\n').filter(line => line.trim());
+                const transactions = [];
+                // Enhanced regex for common bank formats
+                const transactionRegex = /(?:(\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}))\s+(.*?)\s+([-$]?[\d,]+\.\d{2})\b/g;
+                let match;
+                lines.forEach((line, idx) => {
+                    updateProgress(50 + (idx / lines.length) * 50);
+                    while ((match = transactionRegex.exec(line)) !== null) {
+                        let dateStr = match[1].replace(/-/g, '/');
+                        let year = dateStr.split('/')[2];
+                        if (year && year.length === 2) dateStr = dateStr.replace(year, `20${year}`);
+                        transactions.push({
+                            date: new Date(dateStr),
+                            desc: match[2].toLowerCase().trim(),
+                            amount: -Math.abs(parseFloat(match[3].replace(/[$,]/g, '')))
+                        });
+                    }
+                });
+                return transactions.filter(t => !isNaN(t.date.getTime()) && t.desc);
+            } finally {
+                URL.revokeObjectURL(url);
+            }
         }
 
         function parseXLSX(file) {
             return new Promise((resolve, reject) => {
                 const reader = new FileReader();
                 reader.onload = e => {
-                    const data = new Uint8Array(e.target.result);
-                    const workbook = XLSX.read(data, { type: 'array' });
-                    const sheet = workbook.Sheets[workbook.SheetNames[0]];
-                    const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
-                    const headers = rows[0].map(h => h.toLowerCase());
-                    const dateIdx = headers.findIndex(h => h.includes('date'));
-                    const descIdx = headers.findIndex(h => h.includes('desc') || h.includes('memo'));
-                    const amtIdx = headers.findIndex(h => h.includes('amount') || h.includes('debit'));
-                    if (dateIdx === -1 || descIdx === -1 || amtIdx === -1) reject(new Error('Invalid XLSX format'));
-                    const transactions = rows.slice(1).map((row, i) => {
-                        updateProgress((i / rows.length) * 100);
-                        return {
-                            date: new Date(row[dateIdx]),
-                            desc: (row[descIdx] || '').toLowerCase(),
-                            amount: parseFloat(row[amtIdx]) || 0
-                        };
-                    }).filter(t => !isNaN(t.date) && t.amount < 0);
-                    resolve(transactions);
+                    try {
+                        const data = new Uint8Array(e.target.result);
+                        const workbook = XLSX.read(data, { type: 'array' });
+                        const sheet = workbook.Sheets[workbook.SheetNames[0]];
+                        const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, blankrows: false });
+                        if (rows.length < 2) reject(new Error('Empty or invalid sheet.'));
+                        const headers = rows[0].map(h => (h || '').toLowerCase().trim());
+                        const dateIdx = headers.findIndex(h => /date|posting|transaction date/i.test(h));
+                        const descIdx = headers.findIndex(h => /desc|memo|payee|transaction desc/i.test(h));
+                        const amtIdx = headers.findIndex(h => /amount|debit|credit|transaction amount/i.test(h));
+                        if (dateIdx === -1 || descIdx === -1 || amtIdx === -1) reject(new Error('Missing required columns (Date, Description, Amount).'));
+                        const transactions = rows.slice(1).map((row, i) => {
+                            updateProgress((i / rows.length) * 100);
+                            return {
+                                date: new Date(row[dateIdx]),
+                                desc: (row[descIdx] || '').toLowerCase().trim(),
+                                amount: parseFloat(row[amtIdx]) || 0
+                            };
+                        }).filter(t => !isNaN(t.date.getTime()) && t.amount < 0 && t.desc);
+                        resolve(transactions);
+                    } catch (err) {
+                        reject(err);
+                    }
                 };
                 reader.onerror = reject;
                 reader.readAsArrayBuffer(file);
@@ -203,21 +221,26 @@
 
         function detectSubscriptions(transactions) {
             transactions.sort((a, b) => a.date - b.date);
-            const fuse = new Fuse(transactions.map(t => t.desc), { threshold: 0.3 }); // Fuzzy search setup
+            const fuseOptions = { threshold: 0.3, keys: ['desc'] };
+            const fuse = new Fuse(transactions, fuseOptions);
             const groups = {};
             transactions.forEach(t => {
-                const similar = fuse.search(t.desc).map(res => res.item);
-                const key = similar[0] || `${t.desc}_${Math.abs(t.amount).toFixed(2)}`; // Group by fuzzy desc + amount
+                const results = fuse.search(t.desc);
+                const key = results.length > 0 ? results[0].item.desc + '_' + Math.abs(t.amount).toFixed(2) : t.desc + '_' + Math.abs(t.amount).toFixed(2);
                 if (!groups[key]) groups[key] = [];
                 groups[key].push(t);
             });
             return Object.values(groups).filter(group => {
                 if (group.length < 2) return false;
+                let isMonthly = true;
                 for (let i = 1; i < group.length; i++) {
-                    const diff = (group[i].date - group[i-1].date) / (1000 * 60 * 60 * 24);
-                    if (diff < 25 || diff > 35) return false; // Monthly check
+                    const diff = (group[i].date - group[i-1].date) / (1000 * 3600 * 24);
+                    if (diff < 25 || diff > 35) {
+                        isMonthly = false;
+                        break;
+                    }
                 }
-                return true;
+                return isMonthly;
             }).map(group => ({
                 desc: group[0].desc,
                 amount: Math.abs(group[0].amount),
@@ -227,7 +250,7 @@
         }
 
         function renderReport(subs) {
-            function calculate() {
+            function updateTotals() {
                 const monthlyTotal = subs.reduce((sum, s) => sum + s.amount, 0);
                 const wastePct = parseFloat(wastePctInput.value) / 100 || 0.2;
                 const wasted = monthlyTotal * wastePct;
@@ -236,8 +259,8 @@
                 document.getElementById('wastedMonthly').textContent = `$${wasted.toFixed(2)}`;
                 document.getElementById('savingsYearly').textContent = `$${yearlySavings.toFixed(2)}`;
             }
-            calculate();
-            wastePctInput.addEventListener('input', calculate);
+            updateTotals();
+            wastePctInput.addEventListener('input', updateTotals);
 
             const tableBody = document.getElementById('subsTable');
             tableBody.innerHTML = '';
@@ -254,34 +277,36 @@
 
             report.style.display = 'block';
 
-            document.getElementById('cancelBtn').addEventListener('click', () => {
-                alert('Visit the links in the table or contact providers directly. Verify before canceling!');
-            });
+            document.getElementById('cancelBtn').onclick = () => {
+                alert('Use the links in the table to cancel. Always log in to the service and confirm before proceeding!');
+            };
 
-            document.getElementById('exportBtn').addEventListener('click', () => {
-                const csvContent = 'data:text/csv;charset=utf-8,' + 
-                    'Description,Amount,Frequency\n' + 
-                    subs.map(s => `${s.desc},${s.amount},${s.frequency}`).join('\n');
+            document.getElementById('exportBtn').onclick = () => {
+                const csvHeader = 'Description,Amount,Frequency,Action\n';
+                const csvRows = subs.map(s => `${s.desc.replace(/,/g, '')},$${s.amount.toFixed(2)},${s.frequency},${getCancelLink(s.desc).replace(/<[^>]*>/g, '')}`);
+                const csvContent = 'data:text/csv;charset=utf-8,' + csvHeader + csvRows.join('\n');
                 const encodedUri = encodeURI(csvContent);
                 const link = document.createElement('a');
-                link.setAttribute('href', encodedUri);
-                link.setAttribute('download', 'subscriptions_report.csv');
+                link.href = encodedUri;
+                link.download = 'subscription_audit.csv';
                 document.body.appendChild(link);
                 link.click();
                 document.body.removeChild(link);
-            });
+            };
         }
 
         function getCancelLink(desc) {
             for (const [key, link] of Object.entries(cancelLinks)) {
-                if (desc.includes(key)) return `<a href="${link}" target="_blank" rel="noopener noreferrer">Cancel</a>`;
+                if (desc.toLowerCase().includes(key)) {
+                    return `<a href="${link}" target="_blank" rel="noopener noreferrer">Cancel Guide</a>`;
+                }
             }
-            return 'Manual cancel required';
+            return 'Search online for cancellation instructions';
         }
     </script>
     
     <footer style="text-align: center; margin-top: 20px;">
-        <p>🔒 100% private: No data leaves your browser. Review sensitive info before upload.</p>
+        <p>🔒 100% private: No data leaves your browser. Review sensitive info before upload. Not financial advice.</p>
     </footer>
 </body>
 </html>

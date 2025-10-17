@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SubtractApp - Stop Bleeding Money on Forgotten Subscriptions</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+        h1 { text-align: center; }
+        .drop-zone { border: 2px dashed #ccc; padding: 20px; text-align: center; cursor: pointer; }
+        .drop-zone:hover { border-color: #aaa; }
+        #progress { display: none; background: #f0f0f0; padding: 10px; }
+        #progressBar { width: 100%; height: 20px; background: #ddd; }
+        #progressFill { height: 100%; background: #4caf50; width: 0; }
+        #report { display: none; margin-top: 20px; }
+        table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+        th { background-color: #f2f2f2; }
+        .savings { font-weight: bold; color: green; }
+        input[type="number"] { width: 60px; }
+        button { margin-right: 10px; }
+        @media (max-width: 600px) { body { padding: 10px; } table { font-size: 14px; } }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.7.82/pdf.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script> <!-- For XLSX -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/fuse.js/7.0.0/fuse.min.js"></script> <!-- For fuzzy matching -->
+</head>
+<body>
+    <h1>Stop Bleeding Money on Forgotten Subscriptions</h1>
+    <p>The average person wastes $273/month on unused subscriptions. Our tool finds them in seconds—100% privately.</p>
+    
+    <div class="drop-zone" id="dropZone" aria-label="Drop your bank statement here">
+        <p>📁 Drop your bank statement here (CSV, PDF, XLSX)</p>
+        <input type="file" id="fileInput" accept=".csv,.pdf,.xlsx" style="display: none;" aria-hidden="true">
+    </div>
+    
+    <div id="progress">
+        Analyzing... <div id="progressBar"><div id="progressFill"></div></div>
+    </div>
+    <div id="report">
+        <h2>Your Subscription Audit Report</h2>
+        <p>Monthly Total Recurring: <span id="monthlyTotal"></span></p>
+        <p>Wasted Monthly (est. <input type="number" id="wastePct" value="20" min="0" max="100" aria-label="Waste percentage">% unused): <span id="wastedMonthly"></span></p>
+        <p>Potential Yearly Savings: <span id="savingsYearly" class="savings"></span></p>
+        <h3>Detected Subscriptions</h3>
+        <table>
+            <thead><tr><th>Description</th><th>Amount</th><th>Frequency</th><th>Action</th></tr></thead>
+            <tbody id="subsTable"></tbody>
+        </table>
+        <button id="cancelBtn">Get Cancellation Guidance</button>
+        <button id="exportBtn">Export Report to CSV</button>
+    </div>
+
+    <script>
+        // Expanded cancellation links (sourced from official guides)
+        const cancelLinks = {
+            'netflix': 'https://www.netflix.com/cancelplan',
+            'spotify': 'https://www.spotify.com/account/subscription/',
+            'amazon': 'https://www.amazon.com/gp/primecentral',
+            'disney': 'https://www.disneyplus.com/account',
+            'hulu': 'https://www.hulu.com/account',
+            'apple music': 'https://support.apple.com/en-us/118399',
+            'youtube': 'https://www.youtube.com/paid_memberships',
+            'prime video': 'https://www.amazon.com/gp/video/subscriptions/manage',
+            'hbo': 'https://www.max.com/account',
+            'paramount': 'https://www.paramountplus.com/account/',
+            'peacock': 'https://www.peacocktv.com/account',
+            'siriusxm': 'https://www.siriusxm.com/manageaccount',
+            'audible': 'https://www.audible.com/acct',
+            'google': 'https://one.google.com/',
+            'microsoft': 'https://account.microsoft.com/services'
+            // Add more as needed
+        };
+
+        // Setup UI elements
+        const dropZone = document.getElementById('dropZone');
+        const fileInput = document.getElementById('fileInput');
+        const progress = document.getElementById('progress');
+        const progressFill = document.getElementById('progressFill');
+        const report = document.getElementById('report');
+        const wastePctInput = document.getElementById('wastePct');
+
+        dropZone.addEventListener('click', () => fileInput.click());
+        dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.style.borderColor = '#000'; });
+        dropZone.addEventListener('dragleave', () => dropZone.style.borderColor = '#ccc');
+        dropZone.addEventListener('drop', e => {
+            e.preventDefault();
+            dropZone.style.borderColor = '#ccc';
+            handleFile(e.dataTransfer.files[0]);
+        });
+        fileInput.addEventListener('change', e => handleFile(e.target.files[0]));
+
+        async function handleFile(file) {
+            if (!file) return;
+            progress.style.display = 'block';
+            report.style.display = 'none';
+            progressFill.style.width = '0%';
+            try {
+                let transactions = [];
+                if (file.name.endsWith('.csv')) {
+                    transactions = await parseCSV(file);
+                } else if (file.name.endsWith('.pdf')) {
+                    transactions = await parsePDF(file);
+                } else if (file.name.endsWith('.xlsx')) {
+                    transactions = await parseXLSX(file);
+                } else {
+                    throw new Error('Unsupported file type');
+                }
+                const subscriptions = detectSubscriptions(transactions);
+                renderReport(subscriptions);
+            } catch (error) {
+                alert('Error: ' + error.message);
+            } finally {
+                progress.style.display = 'none';
+            }
+        }
+
+        function updateProgress(percent) {
+            progressFill.style.width = `${percent}%`;
+        }
+
+        function parseCSV(file) {
+            return new Promise((resolve, reject) => {
+                Papa.parse(file, {
+                    header: true,
+                    skipEmptyLines: true,
+                    complete: results => {
+                        if (results.errors.length) reject(results.errors[0]);
+                        resolve(results.data.map((row, i) => {
+                            updateProgress((i / results.data.length) * 100);
+                            return {
+                                date: new Date(row.Date || row['Transaction Date'] || row['Posting Date']),
+                                desc: (row.Description || row['Transaction Description'] || row.Memo).toLowerCase(),
+                                amount: parseFloat(row.Amount || row.Debit || row.Credit || row['Transaction Amount']) || 0
+                            };
+                        }).filter(t => !isNaN(t.date) && t.amount < 0)); // Debits negative
+                    },
+                    error: reject
+                });
+            });
+        }
+
+        async function parsePDF(file) {
+            const url = URL.createObjectURL(file);
+            const loadingTask = pdfjsLib.getDocument(url);
+            const pdf = await loadingTask.promise;
+            let text = '';
+            for (let i = 1; i <= pdf.numPages; i++) {
+                updateProgress((i / pdf.numPages) * 50);
+                const page = await pdf.getPage(i);
+                const content = await page.getTextContent();
+                text += content.items.map(item => item.str).join(' ') + '\n';
+            }
+            // Improved regex for various formats: Date (MM/DD/YY or MM/DD/YYYY), Desc, Amount ($XX.XX or -XX.XX)
+            const lines = text.split('\n').filter(line => line.trim());
+            const transactions = [];
+            const transactionRegex = /(?:\b(0?[1-9]|1[0-2])\/(0?[1-9]|[12]\d|3[01])\/(\d{2}|\d{4})\b)\s+(.*?)\s+([-$]?[\d,]+\.\d{2})\b/;
+            lines.forEach((line, idx) => {
+                updateProgress(50 + (idx / lines.length) * 50);
+                const match = line.match(transactionRegex);
+                if (match) {
+                    let year = match[3];
+                    if (year.length === 2) year = `20${year}`;
+                    transactions.push({
+                        date: new Date(`${match[1]}/${match[2]}/${year}`),
+                        desc: match[4].toLowerCase().trim(),
+                        amount: -Math.abs(parseFloat(match[5].replace(/[$,]/g, '')))
+                    });
+                }
+            });
+            URL.revokeObjectURL(url);
+            return transactions.filter(t => !isNaN(t.date));
+        }
+
+        function parseXLSX(file) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = e => {
+                    const data = new Uint8Array(e.target.result);
+                    const workbook = XLSX.read(data, { type: 'array' });
+                    const sheet = workbook.Sheets[workbook.SheetNames[0]];
+                    const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
+                    const headers = rows[0].map(h => h.toLowerCase());
+                    const dateIdx = headers.findIndex(h => h.includes('date'));
+                    const descIdx = headers.findIndex(h => h.includes('desc') || h.includes('memo'));
+                    const amtIdx = headers.findIndex(h => h.includes('amount') || h.includes('debit'));
+                    if (dateIdx === -1 || descIdx === -1 || amtIdx === -1) reject(new Error('Invalid XLSX format'));
+                    const transactions = rows.slice(1).map((row, i) => {
+                        updateProgress((i / rows.length) * 100);
+                        return {
+                            date: new Date(row[dateIdx]),
+                            desc: (row[descIdx] || '').toLowerCase(),
+                            amount: parseFloat(row[amtIdx]) || 0
+                        };
+                    }).filter(t => !isNaN(t.date) && t.amount < 0);
+                    resolve(transactions);
+                };
+                reader.onerror = reject;
+                reader.readAsArrayBuffer(file);
+            });
+        }
+
+        function detectSubscriptions(transactions) {
+            transactions.sort((a, b) => a.date - b.date);
+            const fuse = new Fuse(transactions.map(t => t.desc), { threshold: 0.3 }); // Fuzzy search setup
+            const groups = {};
+            transactions.forEach(t => {
+                const similar = fuse.search(t.desc).map(res => res.item);
+                const key = similar[0] || `${t.desc}_${Math.abs(t.amount).toFixed(2)}`; // Group by fuzzy desc + amount
+                if (!groups[key]) groups[key] = [];
+                groups[key].push(t);
+            });
+            return Object.values(groups).filter(group => {
+                if (group.length < 2) return false;
+                for (let i = 1; i < group.length; i++) {
+                    const diff = (group[i].date - group[i-1].date) / (1000 * 60 * 60 * 24);
+                    if (diff < 25 || diff > 35) return false; // Monthly check
+                }
+                return true;
+            }).map(group => ({
+                desc: group[0].desc,
+                amount: Math.abs(group[0].amount),
+                count: group.length,
+                frequency: 'Monthly'
+            }));
+        }
+
+        function renderReport(subs) {
+            function calculate() {
+                const monthlyTotal = subs.reduce((sum, s) => sum + s.amount, 0);
+                const wastePct = parseFloat(wastePctInput.value) / 100 || 0.2;
+                const wasted = monthlyTotal * wastePct;
+                const yearlySavings = wasted * 12;
+                document.getElementById('monthlyTotal').textContent = `$${monthlyTotal.toFixed(2)}`;
+                document.getElementById('wastedMonthly').textContent = `$${wasted.toFixed(2)}`;
+                document.getElementById('savingsYearly').textContent = `$${yearlySavings.toFixed(2)}`;
+            }
+            calculate();
+            wastePctInput.addEventListener('input', calculate);
+
+            const tableBody = document.getElementById('subsTable');
+            tableBody.innerHTML = '';
+            subs.forEach(s => {
+                const row = document.createElement('tr');
+                row.innerHTML = `
+                    <td title="${s.desc}">${s.desc}</td>
+                    <td>$${s.amount.toFixed(2)}</td>
+                    <td>${s.frequency}</td>
+                    <td>${getCancelLink(s.desc)}</td>
+                `;
+                tableBody.appendChild(row);
+            });
+
+            report.style.display = 'block';
+
+            document.getElementById('cancelBtn').addEventListener('click', () => {
+                alert('Visit the links in the table or contact providers directly. Verify before canceling!');
+            });
+
+            document.getElementById('exportBtn').addEventListener('click', () => {
+                const csvContent = 'data:text/csv;charset=utf-8,' + 
+                    'Description,Amount,Frequency\n' + 
+                    subs.map(s => `${s.desc},${s.amount},${s.frequency}`).join('\n');
+                const encodedUri = encodeURI(csvContent);
+                const link = document.createElement('a');
+                link.setAttribute('href', encodedUri);
+                link.setAttribute('download', 'subscriptions_report.csv');
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+            });
+        }
+
+        function getCancelLink(desc) {
+            for (const [key, link] of Object.entries(cancelLinks)) {
+                if (desc.includes(key)) return `<a href="${link}" target="_blank" rel="noopener noreferrer">Cancel</a>`;
+            }
+            return 'Manual cancel required';
+        }
+    </script>
+    
+    <footer style="text-align: center; margin-top: 20px;">
+        <p>🔒 100% private: No data leaves your browser. Review sensitive info before upload.</p>
+    </footer>
+</body>
+</html>
